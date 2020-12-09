@@ -1,0 +1,34 @@
+Building the modified net-snmp library
+======================================
+
+Known pre-requisites:
+- Centos 7:
+  $ sudo yum install -y centos-release-scl
+  $ sudo yum install -y openssl-devel file make pciutils-devel perl-ExtUtils-Embed llvm-toolset-7.0-clang-devel
+  $ . /opt/rh/llvm-toolset-7.0/enable
+- RHEL 8:
+  $ sudo yum install -y openssl-devel file make perl-ExtUtils-Embed
+- Ubuntu:
+  - Perl development (libperl-dev)
+
+Docker:
+- Centos 7: docker container run --rm --volume $(pwd)/External/net-snmp:/root/source:ro --volume $(pwd)/Build/centos7:/root/build -ti rust-centos7 /bin/bash
+- RHEL 8: docker container run --rm --volume $(pwd)/External/net-snmp:/root/source:ro --volume $(pwd)/Build/rhel8:/root/build -ti rust-rhel8 /bin/bash
+
+To configure, build and install the modified net-snmp library, run the following
+from the net-snmp directory:
+
+# cd /root/build
+# ../source/configure --with-defaults --disable-agent --disable-applications
+# make -C snmplib
+# make installlibs installheaders install_pkgconfig
+
+
+To package into tar files:
+
+- Centos 7:
+  # tar -cvzf netsnmp_si-centos7.tar.gz /usr/local/lib/libnetsnmp*
+  # tar -cvzf netsnmp_si-centos7-dev.tar.gz /usr/local/include/net-snmp /usr/local/lib/pkgconfig
+- RHEL 8:
+  # tar -cvzf netsnmp_si-rhel8.tar.gz /usr/local/lib/libnetsnmp*
+  # tar -cvzf netsnmp_si-rhel8-dev.tar.gz /usr/local/include/net-snmp /usr/local/lib/pkgconfig

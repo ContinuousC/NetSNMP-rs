@@ -1,0 +1,236 @@
+diff --git a/include/net-snmp/library/snmp_secmod.h b/include/net-snmp/library/snmp_secmod.h
+index 937f2356a..77c3578cb 100644
+--- a/include/net-snmp/library/snmp_secmod.h
++++ b/include/net-snmp/library/snmp_secmod.h
+@@ -95,6 +95,11 @@ typedef int     (SecmodDiscoveryMethod) (struct session_list *slp,
+                                          netsnmp_session *session);
+ typedef int     (SecmodPostDiscovery) (struct session_list *slp,
+                                        netsnmp_session *session);
++typedef int     (SecmodDiscoveryPdu) (netsnmp_pdu **pdu);
++typedef int     (SecmodDiscoveryRes) (struct session_list *slp,
++				      netsnmp_session *session,
++				      int              status,
++				      netsnmp_pdu     *response);
+ 
+ typedef int     (SecmodSessionSetup) (netsnmp_session *in_session,
+                                       netsnmp_session *out_session);
+@@ -139,6 +144,8 @@ struct snmp_secmod_def {
+     */
+    SecmodDiscoveryMethod *probe_engineid;
+    SecmodPostDiscovery   *post_probe_engineid;
++   SecmodDiscoveryPdu    *build_probe_pdu;
++   SecmodDiscoveryRes    *process_probe_response;
+ };
+ 
+ 
+diff --git a/include/net-snmp/session_api.h b/include/net-snmp/session_api.h
+index b4715e6b3..8b4ca72b0 100644
+--- a/include/net-snmp/session_api.h
++++ b/include/net-snmp/session_api.h
+@@ -276,6 +276,19 @@ extern          "C" {
+     int             snmp_sess_synch_response(struct session_list *,
+                                              netsnmp_pdu *,
+                                              netsnmp_pdu **);
++    /*
++     * Functions for asynchronous probing of engineID (SNMPv3).
++     */
++    NETSNMP_IMPORT
++    int             snmp_sess_needs_probe(struct session_list *,
++					  netsnmp_pdu *);
++
++    NETSNMP_IMPORT
++    int             snmp_sess_send_probe(struct session_list *);
++
++    NETSNMP_IMPORT
++    int             snmp_sess_process_probe_response(struct session_list *,
++						     int, netsnmp_pdu *);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/snmplib/snmp_api.c b/snmplib/snmp_api.c
+index 926757841..4475a10ff 100644
+--- a/snmplib/snmp_api.c
++++ b/snmplib/snmp_api.c
+@@ -5210,6 +5210,135 @@ _build_initial_pdu_packet(struct session_list *slp, netsnmp_pdu *pdu, int bulk)
+     return SNMPERR_SUCCESS;
+ }
+ 
++/**
++  * Returns 1 if the engineID needs to be probed before sending the pdu.
++  * This can be used together with the SNMP_FLAGS_DONT_PROBE session flag
++  * to avoid synchronous probes in asynchronous requests.
++  *
++  * @param slp         session list pointer
++  * @param pdu         the pdu to be sent next
++  *
++  * @return Nonzero if a probe is necessary.
++  */
++int
++snmp_sess_needs_probe(struct session_list *slp, netsnmp_pdu *pdu) {
++    return ((slp != NULL) && (slp->session != NULL)
++	    && (slp->session->version == SNMP_VERSION_3)
++	    && (slp->session->securityEngineIDLen == 0)
++	    && (pdu->command    != SNMP_MSG_RESPONSE
++		&& pdu->command != SNMP_MSG_TRAP
++		&& pdu->command != SNMP_MSG_TRAP2
++		&& pdu->command != SNMP_MSG_REPORT
++		&& pdu->command != AGENTX_MSG_CLEANUPSET
++		&& pdu->command != AGENTX_MSG_RESPONSE));
++}
++
++
++/**
++ * Send probe pdu for peer engineID.
++ *
++ * @param slp         session list pointer.
++ *
++ * @return If successful, returns the request id of the probe.
++ * If not successful, returns zero.
++ *
++ */
++int
++snmp_sess_send_probe(struct session_list *slp) {
++
++    netsnmp_session *session;
++    netsnmp_pdu     *pdu = NULL;
++    struct snmp_secmod_def *sptr = NULL;
++    int             status;
++
++    if (slp == NULL || slp->session == NULL) {
++        return 0;
++    }
++
++    session = slp->session;
++
++    if ((session->version != SNMP_VERSION_3)
++	|| (session->securityEngineIDLen != 0)) {
++        DEBUGMSGTL(("sess_send_probe", "fail: no probe necessary\n"));
++        return 0;
++    }
++
++    sptr = find_sec_mod(session->securityModel);
++    if (sptr == NULL || sptr->build_probe_pdu == NULL
++	    || sptr->process_probe_response == NULL) {
++        DEBUGMSGTL(("sess_send_probe", "fail: security module does not support async probe\n"));
++        return 0;
++    }
++
++    status = (*sptr->build_probe_pdu) (&pdu);
++    if (status != 0 || pdu == NULL) {
++        DEBUGMSGTL(("sess_send_probe", "fail: build_probe_pdu failed\n"));
++        return 0;
++    }
++
++    status = snmp_sess_send(slp, pdu);
++
++    if (status == 0) {
++        DEBUGMSGTL(("sess_send_probe", "send failed\n"));
++        snmp_free_pdu(pdu);
++        return 0;
++    }
++
++    return status;
++
++}
++
++
++/**
++ * Process the response of an asynchronous probe.
++ *
++ * @param slp      Session list pointer.
++ * @param stat     The returned status code (see snmp_sess_synch_response).
++ * @param pdu      The returned pdu.
++ *
++ * @return If successful, returns SNMPERR_SUCCESS. If not, returns an error code.
++ */
++
++int
++snmp_sess_process_probe_response(struct session_list *slp, int stat, netsnmp_pdu *pdu) {
++
++    netsnmp_session *session;
++    struct snmp_secmod_def *sptr = NULL;
++    int             status;
++
++    if (slp == NULL || slp->session == NULL) {
++        return SNMP_ERR_GENERR;
++    }
++
++    session = slp->session;
++    sptr = find_sec_mod(session->securityModel);
++
++    if (sptr == NULL || sptr->process_probe_response == NULL) {
++        DEBUGMSGTL(("sess_process_probe_response", "fail: not supported by security module\n"));
++        return SNMP_ERR_GENERR;
++    }
++
++    status = (*sptr->process_probe_response)(slp, session, stat, pdu);
++    if (status != SNMPERR_SUCCESS) {
++        return status;
++    }
++
++    if (sptr->post_probe_engineid) {
++        status = (*sptr->post_probe_engineid)(slp, session);
++        if (status != SNMPERR_SUCCESS) {
++            return status;
++        }
++    }
++
++    /*if (pdu != NULL) {
++      snmp_free_pdu(pdu);
++    }*/
++
++    return SNMPERR_SUCCESS;
++
++}
++
++
+ /*
+  * These functions send PDUs using an active session:
+  * snmp_send             - traditional API, no callback
+diff --git a/snmplib/snmpusm.c b/snmplib/snmpusm.c
+index 8a0f15605..bf94b4be1 100644
+--- a/snmplib/snmpusm.c
++++ b/snmplib/snmpusm.c
+@@ -3807,11 +3807,16 @@ usm_build_probe_pdu(netsnmp_pdu **pdu)
+     return 0;
+ }
+ 
++static int usm_process_probe_response(struct session_list *slp,
++				      netsnmp_session *session,
++				      int              status,
++				      netsnmp_pdu     *response);
++
+ static int usm_discover_engineid(struct session_list *slp,
+                                  netsnmp_session *session)
+ {
+     netsnmp_pdu    *pdu = NULL, *response = NULL;
+-    int status, i;
++    int status;
+ 
+     if (usm_build_probe_pdu(&pdu) != 0) {
+         DEBUGMSGTL(("snmp_api", "unable to create probe PDU\n"));
+@@ -3820,6 +3825,14 @@ static int usm_discover_engineid(struct session_list *slp,
+     DEBUGMSGTL(("snmp_api", "probing for engineID...\n"));
+     session->flags |= SNMP_FLAGS_DONT_PROBE; /* prevent recursion */
+     status = snmp_sess_synch_response(slp, pdu, &response);
++    return usm_process_probe_response(slp, session, status, response);
++}
++
++static int usm_process_probe_response(struct session_list *slp,
++				      netsnmp_session *session,
++				      int              status,
++				      netsnmp_pdu     *response) {
++    int i;
+ 
+     if ((response == NULL) && (status == STAT_SUCCESS)) {
+         status = STAT_ERROR;
+@@ -5085,6 +5098,9 @@ init_usm(void)
+     def->handle_report = usm_handle_report;
+     def->probe_engineid = usm_discover_engineid;
+     def->post_probe_engineid = usm_create_user_from_session_hook;
++    def->build_probe_pdu = usm_build_probe_pdu;
++    def->process_probe_response = usm_process_probe_response;
++
+     if (register_sec_mod(USM_SEC_MODEL_NUMBER, "usm", def) != SNMPERR_SUCCESS) {
+         SNMP_FREE(def);
+         snmp_log(LOG_ERR, "could not register usm sec mod\n");

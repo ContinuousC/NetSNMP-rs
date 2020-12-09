@@ -1,0 +1,3 @@
+[submodule "External/net-snmp"]
+	path = External/net-snmp
+	url = git@sigit01:Development/Agents/NetSNMP

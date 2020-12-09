@@ -1,0 +1,156 @@
+diff --git a/include/net-snmp/library/mt_support.h b/include/net-snmp/library/mt_support.h
+index fd8e57c30..633852943 100644
+--- a/include/net-snmp/library/mt_support.h
++++ b/include/net-snmp/library/mt_support.h
+@@ -38,8 +38,9 @@ extern          "C" {
+ #define MT_LIB_MESSAGEID   3
+ #define MT_LIB_SESSIONID   4
+ #define MT_LIB_TRANSID     5
++#define MT_LIB_USMUSERLIST 6
+ 
+-#define MT_LIB_MAXIMUM     6    /* must be one greater than the last one */
++#define MT_LIB_MAXIMUM     7    /* must be one greater than the last one */
+ 
+ 
+ #if defined(NETSNMP_REENTRANT) || defined(WIN32)
+diff --git a/snmplib/snmpusm.c b/snmplib/snmpusm.c
+index bf94b4be1..2d9f7f8f7 100644
+--- a/snmplib/snmpusm.c
++++ b/snmplib/snmpusm.c
+@@ -231,7 +231,7 @@ static struct usmUser *noNameUser = NULL;
+ /*
+  * Local storage (LCD) of the default user list.
+  */
+-static struct usmUser *userList = NULL;
++static struct usmUser *userList = NULL; /* protected by MT_LIB_USMUSERLIST */
+ 
+ /*
+  * Set a given field of the secStateRef.
+@@ -510,10 +510,14 @@ struct usmUser *
+ usm_get_user2(const u_char *engineID, size_t engineIDLen, const void *name,
+               size_t nameLen)
+ {
++    struct usmUser *retVal;
++    snmp_res_lock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+     DEBUGMSGTL(("usm", "getting user %.*s\n", (int)nameLen,
+                 (const char *)name));
+-    return usm_get_user_from_list(engineID, engineIDLen, name, nameLen,
+-                                  userList, 1);
++    retVal = usm_get_user_from_list(engineID, engineIDLen, name, nameLen,
++				    userList, 1);
++    snmp_res_unlock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
++    return retVal;
+ }
+ 
+ /*
+@@ -639,9 +643,11 @@ struct usmUser *
+ usm_add_user(struct usmUser *user)
+ {
+     struct usmUser *uptr;
++    snmp_res_lock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+     uptr = usm_add_user_to_list(user, userList);
+     if (uptr != NULL)
+         userList = uptr;
++    snmp_res_unlock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+     return uptr;
+ }
+ 
+@@ -661,7 +667,7 @@ usm_remove_usmUser_from_list(struct usmUser *user, struct usmUser **ppuserList)
+      * NULL pointers aren't allowed
+      */
+     if (ppuserList == NULL)
+-        ppuserList = &userList;
++        ppuserList = &userList; /* ??? */
+ 
+     if (*ppuserList == NULL)
+         return SNMPERR_USM_UNKNOWNSECURITYNAME;
+@@ -726,7 +732,11 @@ usm_remove_user_from_list(struct usmUser *user,
+ struct usmUser *
+ usm_remove_user(struct usmUser *user)
+ {
+-    return usm_remove_user_from_list(user, &userList);
++    struct usmUser *retVal;
++    snmp_res_lock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
++    retVal = usm_remove_user_from_list(user, &userList);
++    snmp_res_unlock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
++    return retVal;
+ }
+ 
+ /*
+@@ -3068,12 +3078,15 @@ usm_process_in_msg(int msgProcModel,    /* (UNUSED) */
+      * Locate the User record.
+      * If the user/engine ID is unknown, report this as an error.
+      */
+-    if ((user = usm_get_user_from_list(secEngineID, *secEngineIDLen,
+-                                       secName, *secNameLen, userList,
+-                                       (((sess && sess->isAuthoritative ==
+-                                          SNMP_SESS_AUTHORITATIVE) ||
+-                                         (!sess)) ? 0 : 1)))
+-        == NULL) {
++    snmp_res_lock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
++    user = usm_get_user_from_list(secEngineID, *secEngineIDLen,
++				  secName, *secNameLen, userList,
++				  (((sess && sess->isAuthoritative ==
++				     SNMP_SESS_AUTHORITATIVE) ||
++				    (!sess)) ? 0 : 1));
++    snmp_res_unlock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
++
++    if (user == NULL) {
+         DEBUGMSGTL(("usm", "Unknown User(%s)\n", secName));
+         snmp_increment_statistic(STAT_USMSTATSUNKNOWNUSERNAMES);
+         error = SNMPERR_USM_UNKNOWNSECURITYNAME;
+@@ -3601,11 +3614,13 @@ usm_create_user_from_session(netsnmp_session * session)
+      * now that we have the engineID, create an entry in the USM list
+      * for this user using the information in the session 
+      */
++    snmp_res_lock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+     user = usm_get_user_from_list(session->securityEngineID,
+                                   session->securityEngineIDLen,
+                                   session->securityName,
+                                   session->securityNameLen,
+                                   usm_get_userList(), 0);
++    snmp_res_unlock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+     if (NULL != user) {
+         DEBUGMSGTL(("usm", "user exists x=%p\n", user));
+     } else {
+@@ -3941,6 +3956,7 @@ usm_lookup_priv_str(int value)
+ static void
+ clear_user_list(void)
+ {
++    snmp_res_lock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+     struct usmUser *tmp = userList, *next = NULL;
+ 
+     while (tmp != NULL) {
+@@ -3949,7 +3965,7 @@ clear_user_list(void)
+ 	tmp = next;
+     }
+     userList = NULL;
+-
++    snmp_res_unlock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+ }
+ 
+ #ifndef NETSNMP_NO_WRITE_SUPPORT
+@@ -4208,7 +4224,9 @@ usm_save_users_from_list(struct usmUser *puserList, const char *token,
+ static void
+ usm_save_users(const char *token, const char *type)
+ {
++    snmp_res_lock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+     usm_save_users_from_list(userList, token, type);
++    snmp_res_unlock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+ }
+ 
+ /*
+@@ -4360,11 +4378,13 @@ usm_set_password(const char *token, char *line)
+          * match against all engineIDs we know about 
+          */
+         cp = skip_token(cp);
++	snmp_res_lock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+         for (user = userList; user != NULL; user = user->next) {
+             if (user->secName && strcmp(user->secName, nameBuf) == 0) {
+                 usm_set_user_password(user, token, cp);
+             }
+         }
++	snmp_res_unlock(MT_LIBRARY_ID, MT_LIB_USMUSERLIST);
+     } else {
+         cp = read_config_read_octet_string(cp, &engineID, &engineIDLen);
+         if (cp == NULL) {

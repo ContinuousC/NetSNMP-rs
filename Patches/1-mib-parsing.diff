@@ -1,0 +1,187 @@
+diff --git a/include/net-snmp/library/parse.h b/include/net-snmp/library/parse.h
+index 7c33d3f45..ff0d60450 100644
+--- a/include/net-snmp/library/parse.h
++++ b/include/net-snmp/library/parse.h
+@@ -114,7 +114,8 @@ SOFTWARE.
+         char           *reference;    /* references (a quoted string) */
+         int             reported;       /* 1=report started in print_subtree... */
+         char           *defaultValue;
+-       char	       *parseErrorString; /* Contains the error string if there are errors in parsing MIBs */
++        char	       *parseErrorString; /* Contains the error string if there are errors in parsing MIBs */
++        char	       *lastupdated; /* Module last update date */
+     };
+ 
+     /*
+diff --git a/snmplib/parse.c b/snmplib/parse.c
+index 6fcefddee..33b5dd372 100644
+--- a/snmplib/parse.c
++++ b/snmplib/parse.c
+@@ -114,6 +114,7 @@ struct node {
+     char           *hint;
+     char           *units;
+     char           *description; /* description (a quoted string) */
++    char           *lastupdated; /* last update for module identity */
+     char           *reference; /* references (a quoted string) */
+     char           *defaultValue;
+     char           *filename;
+@@ -887,6 +888,7 @@ free_partial_tree(struct tree *tp, int keep_label)
+     SNMP_FREE(tp->hint);
+     SNMP_FREE(tp->units);
+     SNMP_FREE(tp->description);
++    SNMP_FREE(tp->lastupdated);
+     SNMP_FREE(tp->reference);
+     SNMP_FREE(tp->augments);
+     SNMP_FREE(tp->defaultValue);
+@@ -1560,7 +1562,8 @@ do_subtree(struct tree *root, struct node **nodes)
+                 tp->module_list = int_p;
+ 
+                 if (netsnmp_ds_get_boolean(NETSNMP_DS_LIBRARY_ID, 
+-					   NETSNMP_DS_LIB_MIB_REPLACE)) {
++					   NETSNMP_DS_LIB_MIB_REPLACE) ||
++		    tp->type == TYPE_OTHER) {
+                     /*
+                      * Replace from node 
+                      */
+@@ -1654,6 +1657,7 @@ do_subtree(struct tree *root, struct node **nodes)
+                 anon_tp->hint = tp->hint;
+                 anon_tp->units = tp->units;
+                 anon_tp->description = tp->description;
++		anon_tp->lastupdated = tp->lastupdated;
+                 anon_tp->reference = tp->reference;
+                 anon_tp->defaultValue = tp->defaultValue;
+                 anon_tp->parent = tp->parent;
+@@ -2811,6 +2815,7 @@ parse_objectgroup(FILE * fp, char *name, int what, struct objgroup **ol)
+         print_error("Bad STATUS value", token, type);
+         goto skip;
+     }
++    np->status = type;
+     type = get_token(fp, token, MAXTOKEN);
+     if (type != DESCRIPTION) {
+         print_error("Expected DESCRIPTION", token, type);
+@@ -2893,6 +2898,16 @@ parse_notificationDefinition(FILE * fp, char *name)
+                 return NULL;
+             }
+             break;
++	case STATUS:
++	    type = get_token(fp, token, MAXTOKEN);
++	    if (type != MANDATORY && type != CURRENT && type != KW_OPTIONAL &&
++	        type != OBSOLETE && type != DEPRECATED) {
++	        print_error("Bad STATUS", token, type);
++	        free_node(np);
++	        return NULL;
++	    }
++	    np->status = type;
++	    break;
+         default:
+             /*
+              * NOTHING 
+@@ -2973,6 +2988,16 @@ parse_trapDefinition(FILE * fp, char *name)
+                 return NULL;
+             }
+             break;
++	case STATUS:
++	    type = get_token(fp, token, MAXTOKEN);
++	    if (type != MANDATORY && type != CURRENT && type != KW_OPTIONAL &&
++	        type != OBSOLETE && type != DEPRECATED) {
++	        print_error("Bad STATUS", token, type);
++	        free_node(np);
++	        return NULL;
++	    }
++	    np->status = type;
++	    break;
+         default:
+             /*
+              * NOTHING 
+@@ -3136,6 +3161,7 @@ parse_compliance(FILE * fp, char *name)
+         print_error("Bad STATUS", token, type);
+         goto skip;
+     }
++    np->status = type;
+     type = get_token(fp, token, MAXTOKEN);
+     if (type != DESCRIPTION) {
+         print_error("Expected DESCRIPTION", token, type);
+@@ -3231,6 +3257,7 @@ parse_compliance(FILE * fp, char *name)
+                         print_error("Bad MIN-ACCESS spec", token, type);
+                         goto skip;
+                     }
++		    np->access = type;
+                     type = get_token(fp, token, MAXTOKEN);
+                 }
+             }
+@@ -3289,12 +3316,13 @@ parse_capabilities(FILE * fp, char *name)
+         print_error("STATUS should be current or obsolete", token, type);
+         goto skip;
+     }
++    np->status = type;
+     type = get_token(fp, token, MAXTOKEN);
+     if (type != DESCRIPTION) {
+         print_error("Expected DESCRIPTION", token, type);
+         goto skip;
+     }
+-    type = get_token(fp, quoted_string_buffer, MAXTOKEN);
++    type = get_token(fp, quoted_string_buffer, MAXQUOTESTR);
+     if (type != QUOTESTRING) {
+         print_error("Bad DESCRIPTION", quoted_string_buffer, type);
+         goto skip;
+@@ -3378,6 +3406,7 @@ parse_capabilities(FILE * fp, char *name)
+                     print_error("Bad ACCESS", token, type);
+                     goto skip;
+                 }
++		np->access = type;
+                 type = get_token(fp, token, MAXTOKEN);
+             }
+             if (type == CREATEREQ) {
+@@ -3427,11 +3456,15 @@ parse_capabilities(FILE * fp, char *name)
+                 print_error("Expected DESCRIPTION", token, type);
+                 goto skip;
+             }
+-            type = get_token(fp, quoted_string_buffer, MAXTOKEN);
++            type = get_token(fp, quoted_string_buffer, MAXQUOTESTR);
+             if (type != QUOTESTRING) {
+                 print_error("Bad DESCRIPTION", quoted_string_buffer, type);
+                 goto skip;
+             }
++	    if (netsnmp_ds_get_boolean(NETSNMP_DS_LIBRARY_ID, 
++				       NETSNMP_DS_LIB_SAVE_MIB_DESCRS)) {
++	        np->description = strdup(quoted_string_buffer);
++	    }
+             type = get_token(fp, token, MAXTOKEN);
+         }
+     }
+@@ -3504,12 +3537,13 @@ parse_moduleIdentity(FILE * fp, char *name)
+         print_error("Expected LAST-UPDATED", token, type);
+         goto skip;
+     }
+-    type = get_token(fp, token, MAXTOKEN);
++    type = get_token(fp, quoted_string_buffer, MAXQUOTESTR);
+     if (type != QUOTESTRING) {
+         print_error("Need STRING for LAST-UPDATED", token, type);
+         goto skip;
+     }
+-    check_utc(token);
++    check_utc(quoted_string_buffer);
++    np->lastupdated = strdup(quoted_string_buffer);
+     type = get_token(fp, token, MAXTOKEN);
+     if (type != ORGANIZATION) {
+         print_error("Expected ORGANIZATION", token, type);
+@@ -5393,6 +5427,11 @@ find_module(int mid)
+ }
+ #endif /* NETSNMP_FEATURE_REMOVE_FIND_MODULE */
+ 
++struct module  *
++module_list(void)
++{
++    return module_head;
++}
+ 
+ static char     leave_indent[256];
+ static int      leave_was_simple;
+@@ -5693,6 +5732,8 @@ tree_from_node(struct tree *tp, struct node *np)
+     np->units = NULL;
+     tp->description = np->description;
+     np->description = NULL;
++    tp->lastupdated = np->lastupdated;
++    np->lastupdated = NULL;
+     tp->reference = np->reference;
+     np->reference = NULL;
+     tp->defaultValue = np->defaultValue;
